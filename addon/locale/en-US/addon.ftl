@@ -9,3 +9,6 @@ prefs-table-title = Title
 prefs-table-detail = Detail
 tabpanel-lib-tab-label = Lib Tab
 tabpanel-reader-tab-label = Reader Tab
+ai-button-label = AI
+ai-popup-title = AI Preview
+ai-popup-body = Coming soon: smart summaries, auto-tagging, and context-aware search.

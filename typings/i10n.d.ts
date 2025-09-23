@@ -3,6 +3,9 @@
 /* eslint-disable */
 // @ts-nocheck
 export type FluentMessageId =
+  | 'ai-button-label'
+  | 'ai-popup-body'
+  | 'ai-popup-title'
   | 'item-info-row-example-label'
   | 'item-section-example1-head-text'
   | 'item-section-example1-sidenav-tooltip'

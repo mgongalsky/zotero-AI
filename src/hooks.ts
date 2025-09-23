@@ -8,6 +8,8 @@ import {
 import { getString, initLocale } from "./utils/locale";
 import { registerPrefsScripts } from "./modules/preferenceScript";
 import { createZToolkit } from "./utils/ztoolkit";
+import { registerAIPanelButton, unregisterAIPanelButton } from "./modules/aiButton";
+
 
 async function onStartup() {
   await Promise.all([
@@ -82,6 +84,9 @@ async function onMainWindowLoad(win: _ZoteroTypes.MainWindow): Promise<void> {
 
   PromptExampleFactory.registerConditionalCommandExample();
 
+  registerAIPanelButton(win);
+
+
   await Zotero.Promise.delay(1000);
 
   popupWin.changeLine({
@@ -95,6 +100,8 @@ async function onMainWindowLoad(win: _ZoteroTypes.MainWindow): Promise<void> {
 
 async function onMainWindowUnload(win: Window): Promise<void> {
   ztoolkit.unregisterAll();
+  unregisterAIPanelButton(win);
+
   addon.data.dialog?.window?.close();
 }
 

@@ -3,6 +3,8 @@ import { ColumnOptions, DialogHelper } from "zotero-plugin-toolkit";
 import hooks from "./hooks";
 import { createZToolkit } from "./utils/ztoolkit";
 
+//type ZToolkit = ReturnType<typeof createZToolkit>;
+
 class Addon {
   public data: {
     alive: boolean;
