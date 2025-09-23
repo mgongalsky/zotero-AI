@@ -4,8 +4,15 @@
 // @ts-nocheck
 export type FluentMessageId =
   | 'ai-button-label'
+  | 'ai-dialog-title'
+  | 'ai-key-label'
+  | 'ai-output-label'
   | 'ai-popup-body'
   | 'ai-popup-title'
+  | 'ai-prompt-label'
+  | 'ai-send'
+  | 'common-cancel'
+  | 'common-confirm'
   | 'item-info-row-example-label'
   | 'item-section-example1-head-text'
   | 'item-section-example1-sidenav-tooltip'

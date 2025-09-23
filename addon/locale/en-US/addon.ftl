@@ -12,3 +12,13 @@ tabpanel-reader-tab-label = Reader Tab
 ai-button-label = AI
 ai-popup-title = AI Preview
 ai-popup-body = Coming soon: smart summaries, auto-tagging, and context-aware search.
+# AI button & dialog
+ai-dialog-title = Zotero AI (Preview)
+ai-key-label = LLM Key
+ai-prompt-label = Prompt
+ai-output-label = Output
+ai-send = Send
+
+# fallback common (если нет — можешь не добавлять и оставить дефолтные en)
+common-confirm = Confirm
+common-cancel = Cancel
