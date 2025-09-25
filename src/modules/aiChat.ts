@@ -5,6 +5,7 @@ import { createZToolkit } from "../utils/ztoolkit";
 import { getPref, setPref } from "../utils/prefs";
 import { callOpenAI } from "../utils/openai";
 import { log, warn, error } from "../utils/logger";
+import { normalizeLLMResponse } from "../utils/llmResponse";
 
 type DialogData = {
   key: string;
@@ -14,6 +15,8 @@ type DialogData = {
 };
 
 const GLOBAL_HOOK_FLAG = "__zotero_ai_hooks_installed__";
+
+/* utils ------------------------------------------------------------------- */
 
 function redactKey(k: string) {
   if (!k) return "";
@@ -37,7 +40,7 @@ function setAddonDialog(value: unknown) {
     if (!g.addon.data) g.addon.data = {};
     g.addon.data.dialog = value;
   } catch {
-    // ignore
+    /* ignore */
   }
 }
 
@@ -111,6 +114,91 @@ type DialogAreas = {
   outputEl: HTMLTextAreaElement | null;
 };
 
+/* --- diagnostic helpers for LLM object shapes ---------------------------- */
+
+function safePreview(val: unknown, n = 200): string {
+  try {
+    if (val == null) return "null";
+    if (typeof val === "string") return val.slice(0, n);
+    return JSON.stringify(val, null, 2).slice(0, n);
+  } catch {
+    return "[unserializable]";
+  }
+}
+
+function objKeys(o: unknown): string[] {
+  try {
+    return o && typeof o === "object" ? Object.keys(o as any) : [];
+  } catch {
+    return [];
+  }
+}
+
+function hasPath(o: any, path: (string | number)[]): boolean {
+  try {
+    let cur = o;
+    for (const p of path) {
+      if (cur == null) return false;
+      if (typeof p === "number") {
+        if (!Array.isArray(cur) || cur.length <= p) return false;
+        cur = cur[p];
+      } else {
+        if (!(p in cur)) return false;
+        cur = cur[p];
+      }
+    }
+    return cur != null;
+  } catch {
+    return false;
+  }
+}
+
+function getPath(o: any, path: (string | number)[]): unknown {
+  try {
+    let cur = o;
+    for (const p of path) {
+      if (cur == null) return undefined;
+      cur = typeof p === "number" ? cur?.[p] : cur?.[p];
+    }
+    return cur;
+  } catch {
+    return undefined;
+  }
+}
+
+function probeCommonAnswerShapes(raw: unknown) {
+  const r: any = {};
+  if (raw && typeof raw === "object") {
+    // /v1/responses (new OpenAI Responses API)
+    r.responses_output_text_0 = hasPath(raw, ["output_text", 0])
+      ? safePreview(getPath(raw, ["output_text", 0]))
+      : null;
+    r.responses_output_0_content_0_text = hasPath(raw, ["output", 0, "content", 0, "text"])
+      ? safePreview(getPath(raw, ["output", 0, "content", 0, "text"]))
+      : null;
+    r.responses_output_0_text = hasPath(raw, ["output", 0, "text"])
+      ? safePreview(getPath(raw, ["output", 0, "text"]))
+      : null;
+
+    // /v1/chat/completions style
+    r.choices_0_message_content = hasPath(raw, ["choices", 0, "message", "content"])
+      ? safePreview(getPath(raw, ["choices", 0, "message", "content"]))
+      : null;
+    r.choices_0_text = hasPath(raw, ["choices", 0, "text"])
+      ? safePreview(getPath(raw, ["choices", 0, "text"]))
+      : null;
+
+    // generic content fields
+    r.message_content = hasPath(raw, ["message", "content"])
+      ? safePreview(getPath(raw, ["message", "content"]))
+      : null;
+    r.content = hasPath(raw, ["content"]) ? safePreview(getPath(raw, ["content"])) : null;
+  }
+  return r;
+}
+
+/* UI ---------------------------------------------------------------------- */
+
 export async function openAIChatDialog(_win: Window) {
   attachGlobalHooks(_win);
 
@@ -119,7 +207,7 @@ export async function openAIChatDialog(_win: Window) {
     zoteroVersion: (typeof Zotero !== "undefined" && (Zotero as any).version) || "unknown",
   });
 
-  // ВАЖНО: тот же объект отдаём биндеру, чтобы изменения из UI были видны здесь.
+  // IMPORTANT: bind THIS object so UI changes are visible here
   const data = {
     key: ((getPref as any)("llmKey") as string) ?? "",
     prompt: "",
@@ -149,7 +237,7 @@ export async function openAIChatDialog(_win: Window) {
         {
           tag: "input",
           namespace: "html",
-          id: keyId, // id для прямого чтения
+          id: keyId,
           attributes: {
             type: "password",
             "data-bind": "key",
@@ -208,7 +296,7 @@ export async function openAIChatDialog(_win: Window) {
             outputEl: doc.getElementById(outputId) as HTMLTextAreaElement | null,
           };
 
-          // читаем ключ максимально надёжно
+          // read key robustly
           const typedKey = String(areas.keyEl?.value ?? "").trim();
           const boundKey = String((data as DialogData).key ?? "").trim();
           const savedKey = String(((getPref as any)("llmKey") as string) ?? "").trim();
@@ -237,13 +325,70 @@ export async function openAIChatDialog(_win: Window) {
 
           try {
             const t0 = Date.now();
-            const text = await callOpenAI(userText, key);
-            const dt = Date.now() - t0;
-            (data as DialogData).output = text;
-            if (areas.outputEl) areas.outputEl.value = text;
-            log("ai.dialog.send.done", { ms: dt, outputLen: text?.length ?? 0 });
+            const raw: any = await callOpenAI(userText, key); // object or string
 
-            // сразу сохраняем рабочий ключ
+            // -------- RAW diagnostics
+            const rawIsObj = raw && typeof raw === "object";
+            log("ai.dialog.recv.raw.meta", {
+              typeofRaw: typeof raw,
+              isArray: Array.isArray(raw),
+              objTopKeys: rawIsObj ? objKeys(raw) : [],
+              stringLen: typeof raw === "string" ? raw.length : undefined,
+              stringFirst200: typeof raw === "string" ? raw.slice(0, 200) : undefined,
+            });
+            if (rawIsObj) {
+              log("ai.dialog.recv.raw.probes", probeCommonAnswerShapes(raw));
+            }
+
+            // -------- Normalization
+            log("ai.dialog.normalize.begin", {});
+            const norm = normalizeLLMResponse(raw);
+            const normText = (norm?.text ?? "") as string;
+            log("ai.dialog.normalize.end", {
+              source: norm?.source ?? null,
+              textLen: normText.length,
+              textFirst200: normText.slice(0, 200),
+            });
+
+            // -------- Final text + fallback
+            let text = normText.trim();
+            if (!text) {
+              const why =
+                typeof raw === "string"
+                  ? "normalize returned empty, raw is a string"
+                  : "normalize returned empty, raw is an object";
+              warn("ai.dialog.normalize.empty", { why });
+
+              try {
+                text =
+                  typeof raw === "object"
+                    ? JSON.stringify(raw, null, 2)
+                    : String(raw ?? "");
+              } catch (serr: any) {
+                error("ai.dialog.stringify.fail", { message: serr?.message, stack: serr?.stack });
+                text = "[unserializable object]";
+              }
+            }
+
+            const dt = Date.now() - t0;
+
+            (data as DialogData).output = text;
+            if (areas.outputEl) {
+              areas.outputEl.value = text;
+              log("ai.dialog.ui.setOutput", {
+                writtenLen: text.length,
+                first200: text.slice(0, 200),
+              });
+            }
+
+            log("ai.dialog.send.done", {
+              ms: dt,
+              outputLen: text.length,
+              parseSource: norm.source,
+              rawType: typeof raw,
+            });
+
+            // persist a working key immediately
             (setPref as any)("llmKey", key);
           } catch (err: any) {
             const msg = err?.message ?? String(err);
@@ -262,12 +407,15 @@ export async function openAIChatDialog(_win: Window) {
         }),
       });
 
-    // ВАЖНО: биндим ИМЕННО data
+    // bind THIS exact object so changes flow both ways
     dlg.setDialogData(data);
 
     log("ai.dialog.built");
     dlg.open(getString("ai-dialog-title" as any) || "Zotero AI");
-    log("ai.dialog.opened", { prefilledKey: !!(data as DialogData).key, keyPreview: redactKey((data as DialogData).key) });
+    log("ai.dialog.opened", {
+      prefilledKey: !!(data as DialogData).key,
+      keyPreview: redactKey((data as DialogData).key),
+    });
   } catch (e: any) {
     error("ai.dialog.buildOrOpen.fail", { message: e?.message, stack: e?.stack });
     throw e;

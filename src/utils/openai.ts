@@ -1,17 +1,20 @@
 import { log, warn, error } from "./logger";
 
 /**
- * Call OpenAI Responses API and return plain text.
+ * Call OpenAI Responses API and return the **raw provider payload** (object when possible).
+ * Falls back to returning raw text if JSON parsing fails.
  */
-export async function callOpenAI(userText: string, apiKey: string): Promise<string> {
+export async function callOpenAI(userText: string, apiKey: string): Promise<any> {
   const t0 = Date.now();
-  log("callOpenAI.enter", { promptLen: (userText ?? "").length });
+  const promptLen = (userText ?? "").length;
+  log("callOpenAI.enter", { promptLen });
 
   if (!apiKey) {
     const e = new Error("Missing OpenAI API key");
     error("callOpenAI.missingKey", { message: e.message });
     throw e;
   }
+
   const textToSend = String(userText ?? "").trim();
   if (!textToSend) {
     const e = new Error("Prompt is empty");
@@ -22,6 +25,7 @@ export async function callOpenAI(userText: string, apiKey: string): Promise<stri
   const url = "https://api.openai.com/v1/responses";
   const body = {
     model: "gpt-5-chat-latest",
+    // Keep using Responses API "input" array
     input: [
       {
         role: "system",
@@ -47,7 +51,11 @@ export async function callOpenAI(userText: string, apiKey: string): Promise<stri
     store: false,
   };
 
-  log("callOpenAI.request", { url, model: body.model, promptFirst80: textToSend.slice(0, 80) });
+  log("callOpenAI.request", {
+    url,
+    model: body.model,
+    promptFirst80: textToSend.slice(0, 80),
+  });
 
   let res: Response;
   try {
@@ -65,39 +73,54 @@ export async function callOpenAI(userText: string, apiKey: string): Promise<stri
     throw netErr;
   }
 
-  const rawText = await res.clone().text().catch(() => "");
+  // Read as text first so we can always log a safe peek
+  const rawText = await res.text().catch(() => "");
+  const bytesHeader = Number(res.headers.get("content-length") || "0") || undefined;
+
   log("callOpenAI.responseMeta", {
     ok: res.ok,
     status: res.status,
     statusText: res.statusText,
-    bytes: rawText.length,
+    bytesHeader,
+    textLen: rawText.length,
+  });
+  log("callOpenAI.bodyPeek", {
+    first1000: rawText.slice(0, 1000),
   });
 
   if (!res.ok) {
-    error("callOpenAI.response.notOk", {
-      status: res.status,
-      errSnippet: rawText.slice(0, 300),
-    });
-    throw new Error(`OpenAI HTTP ${res.status}: ${res.statusText} :: ${rawText.slice(0, 500)}`);
+    // Try to surface structured OpenAI error message
+    try {
+      const errJson = rawText ? JSON.parse(rawText) : {};
+      const msg =
+        errJson?.error?.message ??
+        errJson?.message ??
+        `HTTP ${res.status} ${res.statusText}`;
+      error("callOpenAI.response.notOk", { status: res.status, message: msg, rawPeek: rawText.slice(0, 300) });
+      throw new Error(msg);
+    } catch {
+      error("callOpenAI.response.notOk.unparsed", {
+        status: res.status,
+        statusText: res.statusText,
+        rawPeek: rawText.slice(0, 300),
+      });
+      throw new Error(`OpenAI HTTP ${res.status}: ${res.statusText} :: ${rawText.slice(0, 500)}`);
+    }
   }
 
-  let json: any;
+  // Try JSON.parse; if it fails, we return the raw text
   try {
-    json = rawText ? JSON.parse(rawText) : {};
-  } catch (parseErr) {
-    error("callOpenAI.json.parseError", { parseErr: String(parseErr), rawSnippet: rawText.slice(0, 300) });
-    throw parseErr;
+    const json = rawText ? JSON.parse(rawText) : {};
+    const topKeys = json && typeof json === "object" ? Object.keys(json).slice(0, 20) : [];
+    log("callOpenAI.parsed.ok", { topKeys });
+    log("callOpenAI.exit", { ms: Date.now() - t0, returnedType: typeof json });
+    return json; // IMPORTANT: return OBJECT (not coerced to string)
+  } catch (parseErr: any) {
+    warn("callOpenAI.json.parseError", {
+      message: parseErr?.message || String(parseErr),
+      rawSnippet: rawText.slice(0, 300),
+    });
+    log("callOpenAI.exit", { ms: Date.now() - t0, returnedType: "string" });
+    return rawText; // Fallback so normalizeLLMResponse can still try
   }
-
-  const candidates = [
-    json.output_text,
-    json.text,
-    json.output?.[0]?.content?.[0]?.text,
-    json.choices?.[0]?.message?.content,
-  ].filter(Boolean);
-
-  const out = String(candidates[0] ?? "");
-  log("callOpenAI.exit", { ms: Date.now() - t0, outLen: out.length });
-
-  return out;
 }
