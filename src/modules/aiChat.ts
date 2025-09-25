@@ -474,9 +474,10 @@ export async function openAIChatDialog(_win: Window) {
               key,
               {
                 model: "gpt-5", // важно: не "chat-latest"
+                max_output_tokens: 8192,             // ↑↑ больше бюджета на ответ
+                //reasoning: { effort: "low" },        // ↓↓ меньше токенов на рассуждение
                 systemPrompt:
                   "You are a scientific literature assistant. Use the attached PDF as the primary source. Always cite exact page numbers in parentheses (e.g., p. 3) for statements derived from the PDF.",
-                max_output_tokens: 2048,
               }
             );
 
