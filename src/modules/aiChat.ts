@@ -3,9 +3,10 @@ import { config } from "../../package.json";
 import { getString } from "../utils/locale";
 import { createZToolkit } from "../utils/ztoolkit";
 import { getPref, setPref } from "../utils/prefs";
-import { callOpenAI } from "../utils/openai";
+import { callOpenAI, callOpenAIWithFiles } from "../utils/openai";
 import { log, warn, error } from "../utils/logger";
 import { normalizeLLMResponse } from "../utils/llmResponse";
+import { loadSelectedPdfFiles } from "../utils/zoteroFiles";
 
 type DialogData = {
   key: string;
@@ -221,7 +222,7 @@ export async function openAIChatDialog(_win: Window) {
   let dlg: InstanceType<typeof tk.Dialog> | undefined;
 
   try {
-    dlg = new tk.Dialog(12, 6)
+    dlg = new tk.Dialog(13, 6)
       .addCell(0, 0, {
         tag: "h1",
         properties: { innerHTML: getString("ai-dialog-title" as any) },
@@ -286,6 +287,7 @@ export async function openAIChatDialog(_win: Window) {
         },
         false
       )
+      // -------- Buttons
       .addButton(getString("ai-send" as any) || "Send", "send", {
         noClose: true,
         callback: measure("ai.dialog.send", async () => {
@@ -395,6 +397,147 @@ export async function openAIChatDialog(_win: Window) {
             (data as DialogData).output = `Error: ${msg}`;
             if (areas.outputEl) areas.outputEl.value = `Error: ${msg}`;
             error("ai.dialog.send.error", { message: msg, stack: err?.stack });
+          }
+        }),
+      })
+      .addButton("Send (PDF)", "send-pdf", {
+        noClose: true,
+        callback: measure("ai.dialog.sendPdf", async () => {
+          const doc = dlg!.window!.document;
+          const areas: DialogAreas = {
+            keyEl: doc.getElementById(keyId) as HTMLInputElement | null,
+            promptEl: doc.getElementById(promptId) as HTMLTextAreaElement | null,
+            outputEl: doc.getElementById(outputId) as HTMLTextAreaElement | null,
+          };
+
+          const typedKey = String(areas.keyEl?.value ?? "").trim();
+          const boundKey = String((data as DialogData).key ?? "").trim();
+          const savedKey = String(((getPref as any)("llmKey") as string) ?? "").trim();
+          const key = typedKey || boundKey || savedKey;
+
+          const userText = String(areas.promptEl?.value || "").trim();
+
+          log("ai.dialog.sendPdf.clicked", {
+            hasKey: Boolean(key),
+            keyPreview: redactKey(key),
+            promptLen: userText.length,
+          });
+
+          if (!key) {
+            warn("ai.dialog.sendPdf.noKey");
+            dlg!.window?.alert("Please enter OpenAI API key first.");
+            return;
+          }
+          if (!userText) {
+            warn("ai.dialog.sendPdf.emptyPrompt");
+            dlg!.window?.alert("Prompt is empty.");
+            return;
+          }
+
+          if (areas.outputEl) areas.outputEl.value = "⏳ Loading PDF from Zotero…";
+
+          // 1) Забираем PDF
+          const files = await loadSelectedPdfFiles();
+          if (!files.length) {
+            warn("ai.dialog.sendPdf.noFiles");
+            if (areas.outputEl)
+              areas.outputEl.value =
+                "No PDF found on the selected item. Select a library item with a PDF attachment and try again.";
+            return;
+          }
+
+          // 2) Готовим data:URI для Responses API
+          const filesForApi = files.map(f => {
+            const alreadyData = (f.file_data || "").startsWith("data:");
+            const file_data = alreadyData
+              ? f.file_data
+              : `data:application/pdf;base64,${f.file_data}`;
+            return { filename: f.filename, file_data };
+          });
+
+          log("ai.dialog.sendPdf.filePreview", {
+            count: filesForApi.length,
+            filename: filesForApi[0].filename,
+            fileDataPrefix: filesForApi[0].file_data.slice(0, 30), // ожидаем "data:application/pdf;base64,"
+            hasDataPrefix: filesForApi[0].file_data.startsWith("data:application/pdf;base64,"),
+          });
+
+          if (areas.outputEl) areas.outputEl.value = "⏳ Sending PDF to OpenAI…";
+
+          try {
+            const t0 = Date.now();
+
+            // 3) Отправляем (модель с поддержкой input_file)
+            const raw: any = await callOpenAIWithFiles(
+              userText,
+              filesForApi as any, // тот же shape: [{ filename, file_data }]
+              key,
+              {
+                model: "gpt-5", // важно: не "chat-latest"
+                systemPrompt:
+                  "You are a scientific literature assistant. Use the attached PDF as the primary source. Always cite exact page numbers in parentheses (e.g., p. 3) for statements derived from the PDF.",
+                max_output_tokens: 2048,
+              }
+            );
+
+            const rawIsObj = raw && typeof raw === "object";
+            log("ai.dialog.recvPdf.raw.meta", {
+              typeofRaw: typeof raw,
+              isArray: Array.isArray(raw),
+              objTopKeys: rawIsObj ? objKeys(raw) : [],
+              stringLen: typeof raw === "string" ? raw.length : undefined,
+              stringFirst200: typeof raw === "string" ? raw.slice(0, 200) : undefined,
+            });
+            if (rawIsObj) {
+              log("ai.dialog.recvPdf.raw.probes", probeCommonAnswerShapes(raw));
+            }
+
+            log("ai.dialog.normalizePdf.begin", {});
+            const norm = normalizeLLMResponse(raw);
+            const normText = (norm?.text ?? "") as string;
+            log("ai.dialog.normalizePdf.end", {
+              source: norm?.source ?? null,
+              textLen: normText.length,
+              textFirst200: normText.slice(0, 200),
+            });
+
+            let text = normText.trim();
+            if (!text) {
+              warn("ai.dialog.normalizePdf.empty");
+              try {
+                text =
+                  typeof raw === "object"
+                    ? JSON.stringify(raw, null, 2)
+                    : String(raw ?? "");
+              } catch (serr: any) {
+                error("ai.dialog.stringifyPdf.fail", { message: serr?.message, stack: serr?.stack });
+                text = "[unserializable object]";
+              }
+            }
+
+            const dt = Date.now() - t0;
+
+            (data as DialogData).output = text;
+            if (areas.outputEl) {
+              areas.outputEl.value = text;
+              log("ai.dialog.ui.setOutputPdf", {
+                writtenLen: text.length,
+                first200: text.slice(0, 200),
+              });
+            }
+
+            log("ai.dialog.sendPdf.done", {
+              ms: dt,
+              outputLen: text.length,
+              rawType: typeof raw,
+            });
+
+            (setPref as any)("llmKey", key);
+          } catch (err: any) {
+            const msg = err?.message ?? String(err);
+            (data as DialogData).output = `Error: ${msg}`;
+            if (areas.outputEl) areas.outputEl.value = `Error: ${msg}`;
+            error("ai.dialog.sendPdf.error", { message: msg, stack: err?.stack });
           }
         }),
       })
