@@ -33,12 +33,11 @@ function hasStack(err: unknown): err is { name?: string; message?: string; stack
 function setAddonDialog(value: unknown) {
   try {
     const g = globalThis as any;
-    // Ensure path exists
     if (!g.addon) g.addon = {};
     if (!g.addon.data) g.addon.data = {};
     g.addon.data.dialog = value;
   } catch {
-    // ignore – not critical for functionality
+    // ignore
   }
 }
 
@@ -90,7 +89,6 @@ function attachGlobalHooks(win: Window | undefined | null) {
 }
 
 type BtnCb = () => void | Promise<void>;
-
 function measure<T extends BtnCb>(name: string, fn: T): T {
   const wrapped: BtnCb = async () => {
     const t0 = Date.now();
@@ -107,8 +105,8 @@ function measure<T extends BtnCb>(name: string, fn: T): T {
   return wrapped as T;
 }
 
-
 type DialogAreas = {
+  keyEl: HTMLInputElement | null;
   promptEl: HTMLTextAreaElement | null;
   outputEl: HTMLTextAreaElement | null;
 };
@@ -121,13 +119,14 @@ export async function openAIChatDialog(_win: Window) {
     zoteroVersion: (typeof Zotero !== "undefined" && (Zotero as any).version) || "unknown",
   });
 
-  // Only the properties we actually bind
-  const data: DialogData = {
+  // ВАЖНО: тот же объект отдаём биндеру, чтобы изменения из UI были видны здесь.
+  const data = {
     key: ((getPref as any)("llmKey") as string) ?? "",
     prompt: "",
     output: "",
-  };
+  } as DialogData & Record<string, unknown>;
 
+  const keyId = `${config.addonRef}-ai-key`;
   const promptId = `${config.addonRef}-ai-prompt`;
   const outputId = `${config.addonRef}-ai-output`;
 
@@ -150,6 +149,7 @@ export async function openAIChatDialog(_win: Window) {
         {
           tag: "input",
           namespace: "html",
+          id: keyId, // id для прямого чтения
           attributes: {
             type: "password",
             "data-bind": "key",
@@ -203,15 +203,21 @@ export async function openAIChatDialog(_win: Window) {
         callback: measure("ai.dialog.send", async () => {
           const doc = dlg!.window!.document;
           const areas: DialogAreas = {
+            keyEl: doc.getElementById(keyId) as HTMLInputElement | null,
             promptEl: doc.getElementById(promptId) as HTMLTextAreaElement | null,
             outputEl: doc.getElementById(outputId) as HTMLTextAreaElement | null,
           };
 
-          const key = String(data.key || "").trim();
+          // читаем ключ максимально надёжно
+          const typedKey = String(areas.keyEl?.value ?? "").trim();
+          const boundKey = String((data as DialogData).key ?? "").trim();
+          const savedKey = String(((getPref as any)("llmKey") as string) ?? "").trim();
+          const key = typedKey || boundKey || savedKey;
+
           const userText = String(areas.promptEl?.value || "").trim();
 
           log("ai.dialog.send.clicked", {
-            hasKey: !!key,
+            hasKey: Boolean(key),
             keyPreview: redactKey(key),
             promptLen: userText.length,
           });
@@ -233,12 +239,15 @@ export async function openAIChatDialog(_win: Window) {
             const t0 = Date.now();
             const text = await callOpenAI(userText, key);
             const dt = Date.now() - t0;
-            data.output = text;
+            (data as DialogData).output = text;
             if (areas.outputEl) areas.outputEl.value = text;
             log("ai.dialog.send.done", { ms: dt, outputLen: text?.length ?? 0 });
+
+            // сразу сохраняем рабочий ключ
+            (setPref as any)("llmKey", key);
           } catch (err: any) {
             const msg = err?.message ?? String(err);
-            data.output = `Error: ${msg}`;
+            (data as DialogData).output = `Error: ${msg}`;
             if (areas.outputEl) areas.outputEl.value = `Error: ${msg}`;
             error("ai.dialog.send.error", { message: msg, stack: err?.stack });
           }
@@ -247,23 +256,18 @@ export async function openAIChatDialog(_win: Window) {
       .addButton(getString("common-cancel" as any) || "Cancel", "cancel")
       .addButton(getString("common-confirm" as any) || "OK", "confirm", {
         callback: measure("ai.dialog.confirm.saveKey", () => {
-          const k = data.key ?? "";
+          const k = (data as DialogData).key ?? "";
           log("ai.dialog.confirm.savingKey", { hasKey: !!k, keyPreview: redactKey(k) });
           (setPref as any)("llmKey", k);
         }),
       });
 
-    // Fix TS2345: pass a plain indexable object to the binder
-    const bindData: Record<string, unknown> = {
-      key: data.key,
-      prompt: data.prompt,
-      output: data.output,
-    };
-    dlg.setDialogData(bindData);
+    // ВАЖНО: биндим ИМЕННО data
+    dlg.setDialogData(data);
 
     log("ai.dialog.built");
     dlg.open(getString("ai-dialog-title" as any) || "Zotero AI");
-    log("ai.dialog.opened", { prefilledKey: !!data.key, keyPreview: redactKey(data.key) });
+    log("ai.dialog.opened", { prefilledKey: !!(data as DialogData).key, keyPreview: redactKey((data as DialogData).key) });
   } catch (e: any) {
     error("ai.dialog.buildOrOpen.fail", { message: e?.message, stack: e?.stack });
     throw e;
@@ -271,7 +275,6 @@ export async function openAIChatDialog(_win: Window) {
 
   setAddonDialog(dlg);
 
-  // Wait for dialog close
   await new Promise<void>((resolve) => {
     dlg!.window?.addEventListener(
       "unload",
