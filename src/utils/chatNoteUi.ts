@@ -29,6 +29,22 @@ function getToolbarElement(doc: Document | undefined): Element | null {
   return null;
 }
 
+// ДОБАВЬ экспорт ниже существующих функций
+export function getSelectedChatNote(): any | null {
+  const win = (Zotero as any)?.getMainWindow?.();
+  const ZoteroPane = win?.ZoteroPane;
+  const selected: any[] = ZoteroPane?.getSelectedItems?.() ?? [];
+  if (!selected?.length) return null;
+
+  const it = selected[0];
+  if (!it?.isNote?.()) return null;
+
+  const tags: Array<{ tag: string }> = it.getTags?.() ?? [];
+  const isChat = tags.some(t => t.tag === "ai:chat");
+  return isChat ? it : null;
+}
+
+
 export async function addToolbarButton(spec: BtnSpec) {
   const win = Zotero?.getMainWindow?.();
   const doc: Document | undefined = win?.document;

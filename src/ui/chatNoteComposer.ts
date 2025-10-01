@@ -14,6 +14,7 @@ let hideBtnEl: HTMLButtonElement | null = null;
 let activeNote: any | null = null;
 let isInserting = false;
 
+
 /** Инициализация нижней панели-композера. Вызывается из hooks.onMainWindowLoad(win). */
 export function initChatNoteComposer(win: _ZoteroTypes.MainWindow) {
   try {
@@ -127,6 +128,25 @@ export function initChatNoteComposer(win: _ZoteroTypes.MainWindow) {
     log("ChatNoteComposer.init");
   } catch (e) {
     warn("ChatNoteComposer.init.error", { message: String(e) });
+  }
+}
+
+export function isComposerVisible(): boolean {
+  return !!composerEl && composerEl.style.display !== "none";
+}
+
+export function showComposer(): void {
+  if (composerEl) composerEl.style.display = "flex";
+}
+
+export function hideComposer(): void {
+  if (composerEl) composerEl.style.display = "none";
+}
+
+/** Гарантирует видимость композера (если был скрыт кнопкой Hide) */
+export function ensureComposerVisible(): void {
+  if (composerEl && composerEl.style.display === "none") {
+    composerEl.style.display = "flex";
   }
 }
 
