@@ -2,18 +2,16 @@
 import { appendChatExchange } from "../modules/chatNoteActions";
 import { warn, log } from "../utils/logger";
 
-// Глобальный Zotero приходит из окружения Zotero
 declare const Zotero: any;
 
 let composerEl: HTMLDivElement | null = null;
 let textareaEl: HTMLTextAreaElement | null = null;
 let insertBtnEl: HTMLButtonElement | null = null;
-let noteTitleEl: HTMLSpanElement | null = null;
+let clearBtnEl: HTMLButtonElement | null = null;
 let hideBtnEl: HTMLButtonElement | null = null;
 
 let activeNote: any | null = null;
 let isInserting = false;
-
 
 /** Инициализация нижней панели-композера. Вызывается из hooks.onMainWindowLoad(win). */
 export function initChatNoteComposer(win: _ZoteroTypes.MainWindow) {
@@ -49,31 +47,6 @@ export function initChatNoteComposer(win: _ZoteroTypes.MainWindow) {
       ].join(";"),
     );
 
-    // Левая колонка: название активной заметки + Hide
-    const leftCol = doc.createElement("div");
-    leftCol.setAttribute("style", "display:flex;flex-direction:column;gap:6px;min-width:220px;");
-
-    const titleRow = doc.createElement("div");
-    titleRow.setAttribute("style", "display:flex;align-items:center;gap:8px;");
-
-    const titleLbl = doc.createElement("strong");
-    titleLbl.textContent = "Chat Note:";
-
-    noteTitleEl = doc.createElement("span");
-    noteTitleEl.textContent = "— none —";
-
-    hideBtnEl = doc.createElement("button");
-    hideBtnEl.textContent = "Hide";
-    hideBtnEl.addEventListener("click", () => {
-      if (!composerEl) return;
-      composerEl.style.display = composerEl.style.display === "none" ? "flex" : "none";
-    });
-
-    titleRow.appendChild(titleLbl);
-    titleRow.appendChild(noteTitleEl);
-    titleRow.appendChild(hideBtnEl);
-    leftCol.appendChild(titleRow);
-
     // Текстовое поле
     textareaEl = doc.createElement("textarea");
     textareaEl.rows = 3;
@@ -91,27 +64,34 @@ export function initChatNoteComposer(win: _ZoteroTypes.MainWindow) {
       ].join(";"),
     );
 
-    // Правая колонка: кнопки
+    // Правая колонка: кнопки (Insert, Clear, Hide)
     const btnCol = doc.createElement("div");
     btnCol.setAttribute("style", "display:flex;flex-direction:column;gap:6px;");
 
     insertBtnEl = doc.createElement("button");
     insertBtnEl.textContent = "Insert to note";
-    // Не оставляем «висящий» промис — явно игнорируем результат
+    insertBtnEl.disabled = true; // пока нет активной chat-note
     insertBtnEl.addEventListener("click", () => {
       void onInsertClick();
     });
 
-    const clearBtn = doc.createElement("button");
-    clearBtn.textContent = "Clear";
-    clearBtn.addEventListener("click", () => {
+    clearBtnEl = doc.createElement("button");
+    clearBtnEl.textContent = "Clear";
+    clearBtnEl.addEventListener("click", () => {
       if (textareaEl) textareaEl.value = "";
     });
 
-    btnCol.appendChild(insertBtnEl);
-    btnCol.appendChild(clearBtn);
+    hideBtnEl = doc.createElement("button");
+    hideBtnEl.textContent = "Hide";
+    hideBtnEl.addEventListener("click", () => {
+      if (!composerEl) return;
+      composerEl.style.display = "none";
+    });
 
-    composerEl.appendChild(leftCol);
+    btnCol.appendChild(insertBtnEl);
+    btnCol.appendChild(clearBtnEl);
+    btnCol.appendChild(hideBtnEl);
+
     composerEl.appendChild(textareaEl);
     composerEl.appendChild(btnCol);
 
@@ -131,37 +111,11 @@ export function initChatNoteComposer(win: _ZoteroTypes.MainWindow) {
   }
 }
 
-export function isComposerVisible(): boolean {
-  return !!composerEl && composerEl.style.display !== "none";
-}
-
-export function showComposer(): void {
-  if (composerEl) composerEl.style.display = "flex";
-}
-
-export function hideComposer(): void {
-  if (composerEl) composerEl.style.display = "none";
-}
-
-/** Гарантирует видимость композера (если был скрыт кнопкой Hide) */
-export function ensureComposerVisible(): void {
-  if (composerEl && composerEl.style.display === "none") {
-    composerEl.style.display = "flex";
-  }
-}
-
-/** Устанавливает активную chat-note, в которую пишет композер. */
+/** Активирует/деактивирует композер для конкретной chat-note (без показа названия). */
 export function setActiveChatNote(note: any | null) {
   activeNote = note || null;
   try {
-    if (noteTitleEl) {
-      if (!note) {
-        noteTitleEl.textContent = "— none —";
-      } else {
-        const t = safeTitleFromNote(note);
-        noteTitleEl.textContent = t ? `“${t}”` : `(note ${note.id})`;
-      }
-    }
+    if (insertBtnEl) insertBtnEl.disabled = !activeNote;
   } catch (e) {
     warn("ChatNoteComposer.setActive.error", { message: String(e) });
   }
@@ -196,20 +150,26 @@ async function onInsertClick(): Promise<void> {
   }
 }
 
-function safeTitleFromNote(note: any): string {
-  try {
-    // У note нет getField('title'), достаём из <h2>…</h2> первой строки
-    const html: string = note.getNote?.() ?? "";
-    const m = html.match(/<h2[^>]*>AI Chat\s+—\s+<em>(.*?)<\/em><\/h2>/i);
-    if (m) return decodeHTMLEntities(m[1]);
-  } catch (e) {
-    warn("ChatNoteComposer.safeTitleFromNote.error", { message: String(e) });
-  }
-  return "";
+/** Текущая видимость панели. */
+export function isComposerVisible(): boolean {
+  return !!composerEl && composerEl.style.display !== "none";
 }
 
-function decodeHTMLEntities(s: string) {
-  return s.replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&amp;/g, "&");
+/** Показать панель. */
+export function showComposer(): void {
+  if (composerEl) composerEl.style.display = "flex";
+}
+
+/** Скрыть панель. */
+export function hideComposer(): void {
+  if (composerEl) composerEl.style.display = "none";
+}
+
+/** Гарантированно показать панель, если была скрыта. */
+export function ensureComposerVisible(): void {
+  if (composerEl && composerEl.style.display === "none") {
+    composerEl.style.display = "flex";
+  }
 }
 
 function notify(message: string) {
