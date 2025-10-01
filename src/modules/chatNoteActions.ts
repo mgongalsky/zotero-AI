@@ -3,6 +3,74 @@ import { log, warn } from "../utils/logger";
 
 declare const Zotero: any;
 
+export async function appendChatExchange(note: any, userText: string, when: Date) {
+  try {
+    const html: string = note.getNote?.() ?? "";
+    const ts = `${when.getFullYear()}-${pad2(when.getMonth() + 1)}-${pad2(when.getDate())} ${pad2(when.getHours())}:${pad2(when.getMinutes())}`;
+
+    const block = [
+      "<!-- BEGIN: ai-chat-block -->",
+      `<p><strong>User</strong> • <em>${ts}</em></p>`,
+      `<blockquote>${escapeHtml(userText).replace(/\n/g, "<br>")}</blockquote>`,
+      "",
+      `<p><strong>Assistant</strong> • <em>${ts}</em></p>`,
+      `<blockquote>Your request was analyzed and properly answered.</blockquote>`,
+      "<hr>",
+      `<p><small>source: ai:chat • model: fake • plugin:v0.1</small></p>`,
+      "<!-- END: ai-chat-block -->",
+    ].join("\n");
+
+    note.setNote(html + "\n" + block + "\n");
+
+    if (note.saveTx) await note.saveTx();
+    else await note.save();
+
+    log("appendChatExchange.saved", { noteID: note.id, len: block.length });
+  } catch (e) {
+    warn("appendChatExchange.error", { message: String(e) });
+    throw e;
+  }
+}
+
+// Поиск "свежей пустой" чат-заметки у того же родителя
+export async function findRecentEmptyChatNote(parent: any, freshnessMs = 3000): Promise<any | null> {
+  try {
+    // дети родителя (attachments, notes и т.д.)
+    const children: any[] = (typeof parent.getChildren === "function")
+      ? (await parent.getChildren())
+      : [];
+
+    const since = Date.now() - freshnessMs;
+
+    for (const it of children) {
+      // интересуют только заметки
+      if (!it?.isNote?.()) continue;
+
+      // должны быть теги ai:chat и ai:parent:<key>
+      const tags: Array<{ tag: string }> = it?.getTags?.() ?? [];
+      const hasChat = tags.some(t => t.tag === "ai:chat");
+      const hasParent = tags.some(t => t.tag === `ai:parent:${parent.key ?? ""}`);
+      if (!hasChat || !hasParent) continue;
+
+      // "свежесть" по времени модификации
+      const raw = (it as any).modTime ?? (it as any).dateModified ?? 0;
+      const modified = (typeof raw === "number") ? raw : Date.parse(String(raw));
+      if (isFinite(modified) && modified < since) continue;
+
+      // "пустая": только стартовая шапка и нет блоков User
+      const html: string = it.getNote?.() ?? "";
+      const looksEmpty = /Это чат-заметка \(child note\)/i.test(html) && !/>\s*User\s*<\/strong>/.test(html);
+      if (looksEmpty) {
+        return it;
+      }
+    }
+  } catch (_e) {
+    // тихо пропускаем — это вспомогательная оптимизация
+  }
+  return null;
+}
+
+
 export async function createChatNoteForParent(parent: any) {
   const title = safeTitle(parent);
   const noteHTML = initialNoteHTML(title, parent);

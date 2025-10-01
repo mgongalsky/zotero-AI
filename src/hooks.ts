@@ -4,6 +4,7 @@ import { registerPrefsScripts } from "./modules/preferenceScript";
 import { createZToolkit } from "./utils/ztoolkit";
 import { registerChatNoteToolbarButton, unregisterChatNoteToolbarButton } from "./modules/chatNoteToolbar";
 import { registerAIPanelButton, unregisterAIPanelButton } from "./modules/aiButton";
+import { initChatNoteComposer } from "./ui/chatNoteComposer";
 
 type MainWin = _ZoteroTypes.MainWindow;
 
@@ -34,6 +35,10 @@ async function onMainWindowLoad(win: MainWin): Promise<void> {
 
   // вернуть старую AI кнопку (ChatGPT icon)
   registerAIPanelButton(win);
+
+
+  // наш нижний композер
+  initChatNoteComposer(win);
 }
 
 async function onMainWindowUnload(win: Window): Promise<void> {

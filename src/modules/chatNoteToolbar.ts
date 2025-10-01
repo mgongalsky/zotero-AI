@@ -1,6 +1,7 @@
 // src/modules/chatNoteToolbar.ts
 import { addToolbarButton, removeToolbarButton, getActiveParentItem } from "../utils/chatNoteUi";
-import { createChatNoteForParent, openNotePreferTab } from "./chatNoteActions";
+import { setActiveChatNote } from "../ui/chatNoteComposer";
+import { createChatNoteForParent, openNotePreferTab, findRecentEmptyChatNote } from "./chatNoteActions";
 import { log, warn } from "../utils/logger";
 
 declare const Zotero: any;
@@ -47,27 +48,16 @@ async function onChatNoteButtonClick() {
   isRunning = true;
   try {
     const parent = getActiveParentItem();
-    if (!parent) {
-      notify("Select a parent item first");
-      warn("ChatNoteToolbarButton.noParentItem");
-      return;
-    }
+    if (!parent) { /* notify... */ return; }
 
-    let note: any;
-    try {
-      note = await createChatNoteForParent(parent);
-    } catch (e) {
-      warn("ChatNoteToolbarButton.createNote.error", { message: String(e) });
-      notify("Failed to create chat note (see logs)");
-      return;
-    }
+    let note = await findRecentEmptyChatNote(parent, 3000);
+    if (!note) note = await createChatNoteForParent(parent);
 
-    notify("Chat note created — opening…");
-    try {
-      await openNotePreferTab(note);
-    } catch (e) {
-      warn("ChatNoteToolbarButton.openNote.error", { message: String(e) });
-    }
+    setActiveChatNote(note);                 // <-- сообщаем композеру
+    notify("Chat note ready — opening…");
+    await openNotePreferTab(note);
+  } catch (e) {
+    warn("ChatNoteToolbarButton.click.error", { message: String(e) });
   } finally {
     isRunning = false;
   }
