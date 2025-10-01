@@ -1,17 +1,20 @@
 // src/modules/chatNoteToolbar.ts
 import { addToolbarButton, removeToolbarButton, getActiveParentItem } from "../utils/chatNoteUi";
+import { createChatNoteForParent, openNotePreferTab } from "./chatNoteActions";
 import { log, warn } from "../utils/logger";
 
 declare const Zotero: any;
 
 const BUTTON_ID = "zai-chatnote-btn";
+// простая защита от повторного входа
+let isRunning = false;
 
 export async function registerChatNoteToolbarButton() {
   try {
     await addToolbarButton({
       id: BUTTON_ID,
       label: "AI Chat Note",
-      tooltip: "Открыть чат-заметку (Step 1: UI only)",
+      tooltip: "Создать/открыть чат-заметку",
       onCommand: onChatNoteButtonClick,
     });
     log("ChatNoteToolbarButton.registered");
@@ -40,21 +43,32 @@ function notify(message: string) {
 }
 
 async function onChatNoteButtonClick() {
-  const parent = getActiveParentItem();
-  if (!parent) {
-    notify("Select a parent item first");
-    warn("ChatNoteToolbarButton.noParentItem");
-    return;
-  }
-
-  let title = "(item)";
+  if (isRunning) return;
+  isRunning = true;
   try {
-    title = parent.getField ? parent.getField("title") : String(parent?.key ?? "(item)");
-  } catch (e) {
-    warn("ChatNoteToolbarButton.readTitle.error", { message: String(e) });
-  }
+    const parent = getActiveParentItem();
+    if (!parent) {
+      notify("Select a parent item first");
+      warn("ChatNoteToolbarButton.noParentItem");
+      return;
+    }
 
-  notify(`AI Chat Note: selected parent “${title}”`);
-  log("ChatNoteToolbarButton.click", { parentKey: parent?.key ?? null, title });
-  // Step 1: только UI. Дальше — создание/открытие child note.
+    let note: any;
+    try {
+      note = await createChatNoteForParent(parent);
+    } catch (e) {
+      warn("ChatNoteToolbarButton.createNote.error", { message: String(e) });
+      notify("Failed to create chat note (see logs)");
+      return;
+    }
+
+    notify("Chat note created — opening…");
+    try {
+      await openNotePreferTab(note);
+    } catch (e) {
+      warn("ChatNoteToolbarButton.openNote.error", { message: String(e) });
+    }
+  } finally {
+    isRunning = false;
+  }
 }

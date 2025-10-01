@@ -1,7 +1,6 @@
 // src/utils/chatNoteUi.ts
 import { warn } from "./logger";
 
-// Небольшая SVG-иконка (чтобы всегда была видна даже в "icons only")
 const ICON_DATA_URI =
   'data:image/svg+xml;utf8,' +
   encodeURIComponent(
@@ -15,19 +14,14 @@ type BtnSpec = {
   label: string;
   tooltip?: string;
   onCommand: () => void;
-  iconDataUri?: string; // опционально — можно подменить иконку
+  iconDataUri?: string;
 };
 
 declare const Zotero: any;
 
 function getToolbarElement(doc: Document | undefined): Element | null {
   if (!doc) return null;
-  // Наиболее частые ID в Zotero 7
-  const candidates = [
-    "zotero-toolbar",            // главный верхний тулбар
-    "zotero-items-toolbar",      // тулбар списка айтемов
-    "zotero-collections-toolbar" // тулбар коллекций (слева)
-  ];
+  const candidates = ["zotero-toolbar", "zotero-items-toolbar", "zotero-collections-toolbar"];
   for (const id of candidates) {
     const el = doc.getElementById(id);
     if (el) return el;
@@ -43,23 +37,25 @@ export async function addToolbarButton(spec: BtnSpec) {
     warn("chatNoteUi.noToolbarFound");
     return;
   }
-  if (doc.getElementById(spec.id)) return; // уже есть
+  if (doc.getElementById(spec.id)) return;
 
-  // Zotero 7 всё ещё понимает XUL toolbarbutton
-  const btn = (doc as any).createXULElement
-    ? (doc as any).createXULElement("toolbarbutton")
-    : doc.createElement("toolbarbutton");
+  const isXUL = !!(doc as any).createXULElement;
+  const btn = isXUL ? (doc as any).createXULElement("toolbarbutton") : doc.createElement("toolbarbutton");
 
   btn.id = spec.id;
   btn.classList.add("toolbarbutton-1");
   btn.setAttribute("type", "button");
   btn.setAttribute("label", spec.label);
-  btn.setAttribute("image", spec.iconDataUri || ICON_DATA_URI); // критично для icons-only
+  btn.setAttribute("image", spec.iconDataUri || ICON_DATA_URI);
   if (spec.tooltip) btn.setAttribute("tooltiptext", spec.tooltip);
 
   const handler = () => spec.onCommand();
-  btn.addEventListener("command", handler);
-  btn.addEventListener("click", handler);
+  // ВАЖНО: подписываемся только на одно событие, чтобы не было двойных срабатываний
+  if (isXUL) {
+    btn.addEventListener("command", handler);
+  } else {
+    btn.addEventListener("click", handler);
+  }
 
   toolbar.appendChild(btn);
 }
@@ -71,7 +67,6 @@ export async function removeToolbarButton(id: string) {
   if (btn && btn.parentElement) btn.parentElement.removeChild(btn);
 }
 
-// Возвращает активный parent item (если выделен attachment/note — поднимаемся к родителю)
 export function getActiveParentItem(): any | null {
   const win = Zotero?.getMainWindow?.();
   const ZoteroPane = win?.ZoteroPane;
