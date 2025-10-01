@@ -9,6 +9,7 @@ import { getString, initLocale } from "./utils/locale";
 import { registerPrefsScripts } from "./modules/preferenceScript";
 import { createZToolkit } from "./utils/ztoolkit";
 import { registerAIPanelButton, unregisterAIPanelButton } from "./modules/aiButton";
+import { registerChatNoteToolbarButton, unregisterChatNoteToolbarButton } from "./modules/chatNoteToolbar";
 
 
 async function onStartup() {
@@ -29,6 +30,8 @@ async function onStartup() {
   await UIExampleFactory.registerExtraColumn();
 
   await UIExampleFactory.registerExtraColumnWithCustomCell();
+
+  await registerChatNoteToolbarButton();
 
   UIExampleFactory.registerItemPaneCustomInfoRow();
 
@@ -105,8 +108,9 @@ async function onMainWindowUnload(win: Window): Promise<void> {
   addon.data.dialog?.window?.close();
 }
 
-function onShutdown(): void {
+async function onShutdown() {
   ztoolkit.unregisterAll();
+  await unregisterChatNoteToolbarButton();
   addon.data.dialog?.window?.close();
   // Remove addon object
   addon.data.alive = false;
