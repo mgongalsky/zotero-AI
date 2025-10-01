@@ -1,5 +1,6 @@
 // src/ui/chatNoteComposer.ts
 import { appendChatExchange } from "../modules/chatNoteActions";
+import { getSelectedChatNote } from "../utils/chatNoteUi";
 import { warn, log } from "../utils/logger";
 
 declare const Zotero: any;
@@ -10,8 +11,13 @@ let insertBtnEl: HTMLButtonElement | null = null;
 let clearBtnEl: HTMLButtonElement | null = null;
 let hideBtnEl: HTMLButtonElement | null = null;
 
-let activeNote: any | null = null;
+let activeNote: any | null = null; // только для UI-индикации; источником истины служит текущее выделение
 let isInserting = false;
+
+function dbgNote(n: any) {
+  if (!n) return null;
+  return { id: n.id, key: n.key, title: (n.getNoteTitle?.() || n.getNote?.()?.slice(0, 80) || "").toString() };
+}
 
 /** Инициализация нижней панели-композера. Вызывается из hooks.onMainWindowLoad(win). */
 export function initChatNoteComposer(win: _ZoteroTypes.MainWindow) {
@@ -70,15 +76,14 @@ export function initChatNoteComposer(win: _ZoteroTypes.MainWindow) {
 
     insertBtnEl = doc.createElement("button");
     insertBtnEl.textContent = "Insert to note";
-    insertBtnEl.disabled = true; // пока нет активной chat-note
-    insertBtnEl.addEventListener("click", () => {
-      void onInsertClick();
-    });
+    insertBtnEl.disabled = false; // всегда активна — проверка цели выполняется в момент клика
+    insertBtnEl.addEventListener("click", () => { void onInsertClick(); });
 
     clearBtnEl = doc.createElement("button");
     clearBtnEl.textContent = "Clear";
     clearBtnEl.addEventListener("click", () => {
       if (textareaEl) textareaEl.value = "";
+      log("ChatNoteComposer.clear");
     });
 
     hideBtnEl = doc.createElement("button");
@@ -86,6 +91,7 @@ export function initChatNoteComposer(win: _ZoteroTypes.MainWindow) {
     hideBtnEl.addEventListener("click", () => {
       if (!composerEl) return;
       composerEl.style.display = "none";
+      log("ChatNoteComposer.hide");
     });
 
     btnCol.appendChild(insertBtnEl);
@@ -111,42 +117,74 @@ export function initChatNoteComposer(win: _ZoteroTypes.MainWindow) {
   }
 }
 
-/** Активирует/деактивирует композер для конкретной chat-note (без показа названия). */
+/** Активирует/деактивирует композер для конкретной chat-note (используется только для UI). */
 export function setActiveChatNote(note: any | null) {
   activeNote = note || null;
-  try {
-    if (insertBtnEl) insertBtnEl.disabled = !activeNote;
-  } catch (e) {
-    warn("ChatNoteComposer.setActive.error", { message: String(e) });
-  }
+  // Кнопку намеренно не блокируем — цель проверяется при клике
+  log("ChatNoteComposer.active.set", { note: dbgNote(activeNote) });
 }
 
 async function onInsertClick(): Promise<void> {
   if (isInserting) return;
   isInserting = true;
   try {
-    if (!activeNote) {
-      notify("No active chat note. Create/open it first.");
-      return;
-    }
     if (!textareaEl) {
       warn("ChatNoteComposer.insert.noTextarea");
       return;
     }
+
+    // 1) В момент клика определяем актуальную цель по текущему выделению
+    const selectedNow = safeGetSelectedChatNote();
+    let targetNote = selectedNow ?? activeNote ?? null;
+
+    // Если выделена другая заметка — переориентируемся
+    if (selectedNow && (!activeNote || selectedNow.id !== activeNote.id)) {
+      setActiveChatNote(selectedNow);
+      targetNote = selectedNow;
+    }
+
+    if (!targetNote) {
+      notify("Select a chat note first.");
+      log("ChatNoteComposer.insert.noTarget");
+      return;
+    }
+
     const text = textareaEl.value.trim();
     if (!text) {
       notify("Prompt is empty.");
       return;
     }
 
-    await appendChatExchange(activeNote, text, new Date());
+    log("ChatNoteComposer.insert.begin", {
+      prev: dbgNote(activeNote),
+      selected: dbgNote(selectedNow),
+      target: dbgNote(targetNote),
+      len: text.length,
+    });
+
+    await appendChatExchange(targetNote, text, new Date());
+
+    log("ChatNoteComposer.append.saved", { noteID: targetNote.id, len: text.length });
     notify("Inserted to note.");
     textareaEl.value = "";
+
+    log("ChatNoteComposer.insert.done", { note: dbgNote(targetNote) });
   } catch (e) {
     warn("ChatNoteComposer.insert.error", { message: String(e) });
     notify("Failed to insert (see logs).");
   } finally {
     isInserting = false;
+  }
+}
+
+function safeGetSelectedChatNote(): any | null {
+  try {
+    // Берём активный pane ровно в момент клика
+    const pane = Zotero?.getActiveZoteroPane?.();
+    if (!pane) return getSelectedChatNote(); // запасной путь
+    return getSelectedChatNote();
+  } catch {
+    return null;
   }
 }
 
