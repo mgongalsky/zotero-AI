@@ -2,6 +2,10 @@
 import { appendChatExchange } from "../modules/chatNoteActions";
 import { getSelectedChatNote } from "../utils/chatNoteUi";
 import { warn, log } from "../utils/logger";
+import { callOpenAI, callOpenAIWithFiles } from "../utils/openai";
+import { normalizeLLMResponse } from "../utils/llmResponse";
+import { getPref } from "../utils/prefs"; // имя адаптируйте под свой prefs.ts
+
 
 declare const Zotero: any;
 
@@ -127,55 +131,123 @@ export function setActiveChatNote(note: any | null) {
 async function onInsertClick(): Promise<void> {
   if (isInserting) return;
   isInserting = true;
+  const restoreBtn = () => {
+    if (insertBtnEl) {
+      insertBtnEl.disabled = false;
+      insertBtnEl.textContent = "Insert to note";
+    }
+  };
+
+  // локальный helper, как в aiChat.ts
+  const redactKey = (k: string) => (!k ? "" : (k.startsWith("sk-") ? "sk-***REDACTED***" : "***REDACTED***"));
+
   try {
     if (!textareaEl) {
       warn("ChatNoteComposer.insert.noTextarea");
       return;
     }
 
-    // 1) В момент клика определяем актуальную цель по текущему выделению
     const selectedNow = safeGetSelectedChatNote();
     let targetNote = selectedNow ?? activeNote ?? null;
 
-    // Если выделена другая заметка — переориентируемся
     if (selectedNow && (!activeNote || selectedNow.id !== activeNote.id)) {
       setActiveChatNote(selectedNow);
       targetNote = selectedNow;
     }
-
     if (!targetNote) {
       notify("Select a chat note first.");
       log("ChatNoteComposer.insert.noTarget");
       return;
     }
 
-    const text = textareaEl.value.trim();
-    if (!text) {
+    const userText = textareaEl.value.trim();
+    if (!userText) {
       notify("Prompt is empty.");
       return;
+    }
+
+    // UI: блокируем кнопку на время запроса
+    if (insertBtnEl) {
+      insertBtnEl.disabled = true;
+      insertBtnEl.textContent = "Sending…";
     }
 
     log("ChatNoteComposer.insert.begin", {
       prev: dbgNote(activeNote),
       selected: dbgNote(selectedNow),
       target: dbgNote(targetNote),
-      len: text.length,
+      len: userText.length,
     });
 
-    await appendChatExchange(targetNote, text, new Date());
+    // ----- ЧТЕНИЕ ПРЕФОВ (как в aiChat.ts) -----
+    const pref = getPref as unknown as (k: string) => any;
 
-    log("ChatNoteComposer.append.saved", { noteID: targetNote.id, len: text.length });
+    // ключ берём из llmKey (основной) с фолбэком на openaiApiKey (если у тебя был старый ключ)
+    const savedKey = String(pref("llmKey") ?? "").trim();
+    const fallbackKey = String(pref("openaiApiKey") ?? "").trim();
+    const apiKey = savedKey || fallbackKey;
+
+    log("ChatNoteComposer.llm.keyMeta", { hasKey: !!apiKey, keyPreview: redactKey(apiKey) });
+
+    if (!apiKey) {
+      notify("OpenAI API key is missing. Set it in Preferences.");
+      warn("ChatNoteComposer.insert.noApiKey");
+      return;
+    }
+
+    const modelPref = String(pref("openaiModel") ?? pref("llmModel") ?? "").trim();
+    const maxTokensPref = Number(pref("openaiMaxTokens") ?? 2048);
+    const topPPref = Number(pref("openaiTopP") ?? 1);
+    const systemPromptPref =
+      String(pref("openaiSystemPrompt") ?? pref("llmSystemPrompt") ?? "").trim() ||
+      "You are a helpful scientific literature assistant. Reply concisely, format lists when helpful.";
+
+    // ----- ВЫЗОВ LLM -----
+    let assistantText = "";
+    try {
+      const raw = await callOpenAIWithFiles(
+        userText,
+        [], // файлов нет; используем opts, чтобы передать модель/промпт из префов
+        apiKey,
+        {
+          model: modelPref || undefined,
+          systemPrompt: systemPromptPref,
+          max_output_tokens: Number.isFinite(maxTokensPref) ? maxTokensPref : 2048,
+          top_p: Number.isFinite(topPPref) ? topPPref : 1,
+          store: false,
+        }
+      );
+      const norm = normalizeLLMResponse(raw);
+      assistantText = (norm.text || "").trim();
+      log("ChatNoteComposer.llm.ok", { source: norm.source, answerLen: assistantText.length });
+    } catch (llmErr: any) {
+      warn("ChatNoteComposer.llm.error", { message: String(llmErr) });
+      assistantText = `⚠️ OpenAI error: ${String(llmErr?.message || llmErr)}`;
+    }
+
+    // Сохраняем в заметку одним вызовом: User + Assistant (обновлённая сигнатура)
+    await appendChatExchange(targetNote, userText, new Date(), assistantText);
+
+    log("ChatNoteComposer.append.saved", {
+      noteID: targetNote.id,
+      userLen: userText.length,
+      assistantLen: assistantText.length,
+    });
+
     notify("Inserted to note.");
     textareaEl.value = "";
-
     log("ChatNoteComposer.insert.done", { note: dbgNote(targetNote) });
   } catch (e) {
     warn("ChatNoteComposer.insert.error", { message: String(e) });
     notify("Failed to insert (see logs).");
   } finally {
+    restoreBtn();
     isInserting = false;
   }
 }
+
+
+
 
 function safeGetSelectedChatNote(): any | null {
   try {

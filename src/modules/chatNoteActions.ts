@@ -3,34 +3,53 @@ import { log, warn } from "../utils/logger";
 
 declare const Zotero: any;
 
-export async function appendChatExchange(note: any, userText: string, when: Date) {
+export async function appendChatExchange(
+  note: any,
+  userText: string,
+  when: Date,
+  assistantText?: string
+): Promise<void> {
   try {
-    const html: string = note.getNote?.() ?? "";
+    const html: string = String(note.getNote?.() ?? "");
     const ts = `${when.getFullYear()}-${pad2(when.getMonth() + 1)}-${pad2(when.getDate())} ${pad2(when.getHours())}:${pad2(when.getMinutes())}`;
+
+    const userHtml = escapeHtml(userText).replace(/\r?\n/g, "<br>");
+    const hasAssistant = typeof assistantText === "string";
+    const assistantHtml = hasAssistant
+      ? escapeHtml(assistantText as string).replace(/\r?\n/g, "<br>")
+      : "<em>pending…</em>";
 
     const block = [
       "<!-- BEGIN: ai-chat-block -->",
       `<p><strong>User</strong> • <em>${ts}</em></p>`,
-      `<blockquote>${escapeHtml(userText).replace(/\n/g, "<br>")}</blockquote>`,
+      `<blockquote>${userHtml}</blockquote>`,
       "",
       `<p><strong>Assistant</strong> • <em>${ts}</em></p>`,
-      `<blockquote>Your request was analyzed and properly answered.</blockquote>`,
+      `<blockquote>${assistantHtml}</blockquote>`,
       "<hr>",
-      `<p><small>source: ai:chat • model: fake • plugin:v0.1</small></p>`,
+      // метки можно скорректировать позже, если будете прокидывать модель/источник
+      `<p><small>source: ai:chat • status: ${hasAssistant ? "ok" : "pending"} • plugin:v0.1</small></p>`,
       "<!-- END: ai-chat-block -->",
-    ].join("\n");
+    ]
+      .filter(Boolean)
+      .join("\n");
 
-    note.setNote(html + "\n" + block + "\n");
+    note.setNote((html ? html + "\n" : "") + block + "\n");
 
     if (note.saveTx) await note.saveTx();
     else await note.save();
 
-    log("appendChatExchange.saved", { noteID: note.id, len: block.length });
+    log("appendChatExchange.saved", {
+      noteID: note.id,
+      userLen: userText.length,
+      assistantLen: hasAssistant ? String(assistantText).length : 0,
+    });
   } catch (e) {
     warn("appendChatExchange.error", { message: String(e) });
     throw e;
   }
 }
+
 
 // Поиск "свежей пустой" чат-заметки у того же родителя
 export async function findRecentEmptyChatNote(parent: any, freshnessMs = 3000): Promise<any | null> {
@@ -79,8 +98,8 @@ export async function createChatNoteForParent(parent: any) {
   note.libraryID = parent.libraryID;
 
   // Привязка к родителю (поддержим оба варианта на всякий случай)
-  try { note.parentItem = parent; } catch {}
-  try { note.parentID = parent.id; } catch {}
+  try { note.parentItem = parent; } catch {;}
+  try { note.parentID = parent.id; } catch {;}
 
   // Теги (через setTags — наиболее совместимый путь)
   try {
