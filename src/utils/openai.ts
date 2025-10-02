@@ -196,7 +196,7 @@ export async function callOpenAI(
     text: {},
     reasoning: {},
     tools: [],
-    max_output_tokens: 2048,
+    max_output_tokens: 8192,
     top_p: 1,
     store: false,
   };
@@ -273,7 +273,7 @@ export async function callOpenAIWithFiles(
     reasoning: opts.reasoning ?? {},
     tools: opts.tools ?? [],
     max_output_tokens:
-      typeof opts.max_output_tokens === "number" ? opts.max_output_tokens : 2048,
+      typeof opts.max_output_tokens === "number" ? opts.max_output_tokens : 8192,
     top_p: typeof opts.top_p === "number" ? opts.top_p : 1,
     store: !!opts.store,
   };

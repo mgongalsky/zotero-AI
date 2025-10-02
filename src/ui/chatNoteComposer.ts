@@ -5,6 +5,8 @@ import { warn, log } from "../utils/logger";
 import { callOpenAI, callOpenAIWithFiles } from "../utils/openai";
 import { normalizeLLMResponse } from "../utils/llmResponse";
 import { getPref } from "../utils/prefs"; // имя адаптируйте под свой prefs.ts
+import { loadSelectedPdfFiles } from "../utils/zoteroFiles";
+
 
 
 declare const Zotero: any;
@@ -22,6 +24,8 @@ function dbgNote(n: any) {
   if (!n) return null;
   return { id: n.id, key: n.key, title: (n.getNoteTitle?.() || n.getNote?.()?.slice(0, 80) || "").toString() };
 }
+
+
 
 /** Инициализация нижней панели-композера. Вызывается из hooks.onMainWindowLoad(win). */
 export function initChatNoteComposer(win: _ZoteroTypes.MainWindow) {
@@ -127,6 +131,160 @@ export function setActiveChatNote(note: any | null) {
   // Кнопку намеренно не блокируем — цель проверяется при клике
   log("ChatNoteComposer.active.set", { note: dbgNote(activeNote) });
 }
+// --- helpers: host & pdfs -------------------------------------------------
+type InputFileForApi = { filename: string; file_data: string };
+
+function sleep(ms: number) {
+  return new Promise(res => setTimeout(res, ms));
+}
+
+function extractCandidateTitleFromNote(note: any): string {
+  try {
+    const raw = String(note?.getNoteTitle?.() || note?.getNote?.() || "").trim();
+    // ваши чат-заметки называются вида "AI Chat — <Title>"
+    const m = raw.match(/AI\s*Chat\s*[-—]\s*(.+)$/i);
+    return (m ? m[1] : raw).trim();
+  } catch {
+    return "";
+  }
+}
+
+function getItemTitle(it: any): string {
+  try {
+    return String(it?.getDisplayTitle?.() || it?.getField?.("title") || "").trim();
+  } catch {
+    return "";
+  }
+}
+
+async function findHostItemForChatNote(note: any): Promise<any | null> {
+  // 1) если заметка — ребёнок статьи/записи
+  const viaSource = typeof note?.getSource === "function" ? note.getSource() : null;
+  if (viaSource && viaSource.id) return viaSource;
+
+  // 2) эвристика по названию внутри тех же коллекций
+  const wantTitle = extractCandidateTitleFromNote(note).toLowerCase();
+  const colIds: number[] = (typeof note?.getCollections === "function" ? note.getCollections() : []) || [];
+  if (!colIds.length) return null;
+
+  let best: any | null = null;
+  let bestScore = -1;
+
+  for (const cid of colIds) {
+    const coll = (Zotero as any)?.Collections?.get?.(cid);
+    const children: any[] = coll?.getChildItems?.() || [];
+    for (const it of children) {
+      if (!it?.isRegularItem?.() || typeof it.getAttachments !== "function") continue;
+
+      const t = getItemTitle(it).toLowerCase();
+      const atts: number[] = it.getAttachments?.() || [];
+      if (!atts.length) continue; // интересуют только записи с вложениями
+
+      // простая метрика близости по заголовку
+      let score = 0;
+      if (wantTitle) {
+        if (t === wantTitle) score += 5;
+        if (t.includes(wantTitle)) score += 3;
+        // частичное совпадение по первым 40 символам
+        const head = wantTitle.slice(0, Math.min(40, wantTitle.length));
+        if (head && t.includes(head)) score += 2;
+      }
+      if (score > bestScore) {
+        bestScore = score;
+        best = it;
+      }
+    }
+  }
+  return best;
+}
+
+async function loadPdfFilesForChatNote(note: any): Promise<InputFileForApi[]> {
+  const pane = (Zotero as any)?.getActiveZoteroPane?.();
+  const prevSel: any[] =
+    (pane && typeof pane.getSelectedItems === "function")
+      ? (pane.getSelectedItems() || [])
+      : [];
+
+  try {
+    // --- host строго из parentItem, без поисков и эвристик ---
+    let host: any = (note as any)?.parentItem || null;
+
+    if (typeof host === "number") {
+      host = (Zotero as any).Items?.get?.(host) || null; // parentItem как itemID
+    } else if (typeof host === "string") {
+      // parentItem как itemKey
+      host =
+        (Zotero as any).Items?.getByLibraryAndKey?.(note.libraryID, host) ||
+        (Zotero as any).Items?.getByKey?.(host) ||
+        null;
+    }
+
+    if (!host || !host.id) {
+      log("ChatNoteComposer.host.notFound.parentItem", {
+        noteID: note?.id,
+        type: typeof (note as any)?.parentItem,
+        parentItem: (note as any)?.parentItem ?? null,
+      });
+      return [];
+    }
+
+    log("ChatNoteComposer.host.found", {
+      hostID: host.id,
+      hostTitle: (host.getDisplayTitle?.() || host.getField?.("title") || "").toString(),
+      via: "parentItem",
+    });
+
+    // Выделяем родителя в текущем списке, чтобы переиспользовать loadSelectedPdfFiles()
+    if (pane?.selectItems) {
+      pane.selectItems([host.id]);
+    } else if (pane?.itemsView?.selectItems) {
+      pane.itemsView.selectItems([host.id]);
+    } else if (pane?.selectItem) {
+      pane.selectItem(host.id);
+    }
+
+    // дать UI обновиться
+    await sleep(30);
+
+    // Читаем PDF-вложения у выделенного item
+    const files = await loadSelectedPdfFiles(); // [{ filename, file_data (base64 без data:) }, ...]
+    if (!Array.isArray(files) || !files.length) {
+      log("ChatNoteComposer.pdf.noneForHost", { hostID: host.id });
+      return [];
+    }
+
+    // Приводим к формату OpenAI (добавляем data: префикс)
+    const filesForApi: InputFileForApi[] = files.map((f: any) => {
+      const raw = String(f?.file_data || "");
+      const prefixed = raw.startsWith("data:")
+        ? raw
+        : `data:application/pdf;base64,${raw}`;
+      return {
+        filename: String(f?.filename || "attachment.pdf"),
+        file_data: prefixed,
+      };
+    });
+
+    log("ChatNoteComposer.pdf.found", {
+      count: filesForApi.length,
+      first: filesForApi[0]?.filename,
+    });
+
+    return filesForApi;
+  } catch (e) {
+    warn("ChatNoteComposer.loadPdfFilesForChatNote.error", { message: String(e) });
+    return [];
+  } finally {
+    // восстановить предыдущий выбор, чтобы не ломать UX
+    try {
+      if (pane && prevSel && prevSel.length) {
+        const ids = prevSel.map((x: any) => x.id).filter(Boolean);
+        if (ids.length && pane.selectItems) pane.selectItems(ids);
+        else if (ids.length && pane.itemsView?.selectItems) pane.itemsView.selectItems(ids);
+      }
+    } catch { /* ignore */ }
+  }
+}
 
 async function onInsertClick(): Promise<void> {
   if (isInserting) return;
@@ -179,14 +337,13 @@ async function onInsertClick(): Promise<void> {
       len: userText.length,
     });
 
-    // ----- ЧТЕНИЕ ПРЕФОВ (как в aiChat.ts) -----
+// ----- ЧТЕНИЕ ПРЕФОВ (как в aiChat.ts) -----
     const pref = getPref as unknown as (k: string) => any;
-
-    // ключ берём из llmKey (основной) с фолбэком на openaiApiKey (если у тебя был старый ключ)
     const savedKey = String(pref("llmKey") ?? "").trim();
     const fallbackKey = String(pref("openaiApiKey") ?? "").trim();
     const apiKey = savedKey || fallbackKey;
 
+    const redactKey = (k: string) => (!k ? "" : (k.startsWith("sk-") ? "sk-***REDACTED***" : "***REDACTED***"));
     log("ChatNoteComposer.llm.keyMeta", { hasKey: !!apiKey, keyPreview: redactKey(apiKey) });
 
     if (!apiKey) {
@@ -199,15 +356,27 @@ async function onInsertClick(): Promise<void> {
     const maxTokensPref = Number(pref("openaiMaxTokens") ?? 2048);
     const topPPref = Number(pref("openaiTopP") ?? 1);
     const systemPromptPref =
-      String(pref("openaiSystemPrompt") ?? pref("llmSystemPrompt") ?? "").trim() ||
-      "You are a helpful scientific literature assistant. Reply concisely, format lists when helpful.";
+      String(pref("openaiSystemPrompt") ?? pref("llmSystemPrompt") ?? "").trim()
+      || "You are a helpful scientific literature assistant. Reply concisely, format lists when helpful.";
 
-    // ----- ВЫЗОВ LLM -----
+// ----- ПОДГОТОВКА PDF из «родительской» статьи -----
+    let filesForApi: { filename: string; file_data: string }[] = [];
+    try {
+      filesForApi = await loadPdfFilesForChatNote(targetNote);
+      log("ChatNoteComposer.pdf.found", {
+        count: filesForApi.length,
+        first: filesForApi[0]?.filename,
+      });
+    } catch (e: any) {
+      warn("ChatNoteComposer.pdf.load.error", { message: String(e) });
+    }
+
+// ----- ВЫЗОВ LLM (с PDF если есть) -----
     let assistantText = "";
     try {
       const raw = await callOpenAIWithFiles(
         userText,
-        [], // файлов нет; используем opts, чтобы передать модель/промпт из префов
+        filesForApi, // ← если массив пуст, просто пойдёт текст-only
         apiKey,
         {
           model: modelPref || undefined,
@@ -219,7 +388,11 @@ async function onInsertClick(): Promise<void> {
       );
       const norm = normalizeLLMResponse(raw);
       assistantText = (norm.text || "").trim();
-      log("ChatNoteComposer.llm.ok", { source: norm.source, answerLen: assistantText.length });
+      log("ChatNoteComposer.llm.ok", {
+        source: norm.source,
+        answerLen: assistantText.length,
+        withPdf: filesForApi.length > 0,
+      });
     } catch (llmErr: any) {
       warn("ChatNoteComposer.llm.error", { message: String(llmErr) });
       assistantText = `⚠️ OpenAI error: ${String(llmErr?.message || llmErr)}`;
